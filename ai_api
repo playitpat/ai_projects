@@ -1,0 +1,165 @@
+# libraries
+import os
+import tiktoken
+import json
+from openai import OpenAI
+from datetime import datetime
+
+# constants
+# env stored API key
+DEFAULT_API_KEY = os.environ.get("TOGETHER_API_KEY")
+DEFAULT_BASE_URL = "https://api.together.xyz/v1"
+DEFAULT_TEMPERATURE = 0.4
+DEFAULT_MAX_TOKENS = 512
+DEFAULT_MODEL = "mistralai/Mistral-7B-Instruct-v0.1"
+DEFAULT_TOKEN_BUDGET = 4096
+
+# main class
+class ConversationManager:
+        def __init__(self, api_key=None, base_url=None, model=None, history_file=None, temperature=None, max_tokens=None, token_budget = None):
+            if not api_key:
+                api_key = DEFAULT_API_KEY
+            if not base_url:
+                base_url = DEFAULT_BASE_URL
+            
+            self.client = OpenAI(
+                api_key = api_key,
+                base_url = base_url
+            )
+            self.model = model if model else DEFAULT_MODEL
+            self.temperature = temperature if temperature else DEFAULT_TEMPERATURE
+            self.max_tokens = max_tokens if max_tokens else DEFAULT_MAX_TOKENS
+            self.token_budget = token_budget if token_budget else DEFAULT_TOKEN_BUDGET
+            
+            # personas
+            self.system_messages = {
+                "sassy assistant": "You are a sassy assistant fed up to answer questions.",
+                "pino": "You are 5 years old immigrant from Italy.",
+                "yuuki": "You are an action anime protagonist.",
+                "custom": "Enter your custom system message here."
+        }
+            self.system_message = self.system_messages["pino"]  # Default persona
+            self.conversation_history = [
+            {"role": "system", "content": self.system_message}
+            ]
+            
+            # name history file
+            if history_file is None:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                self.history_file = f"conversation_history_{timestamp}.json"
+            else:
+                self.history_file = history_file
+                
+            self.load_conversation_history()
+
+        # count tokens
+        def count_tokens(self, text):
+            try:
+                encoding = tiktoken.encoding_for_model(self.model)
+            except KeyError:
+                encoding = tiktoken.get_encoding("cl100k_base")
+
+                tokens = encoding.encode(text)
+            return len(tokens)
+        
+        # total tokens used
+        def total_tokens_used(self):
+            return sum(self.count_tokens(message['content']) for message in self.conversation_history)
+        
+        # tokens budget
+        def enforce_token_budget(self):
+            while self.total_tokens_used() > self.token_budget:
+                if len(self.conversation_history) <= 1:
+                    break
+                self.conversation_history.pop(1)
+                
+        
+        # set persona system
+        def set_persona(self, persona):
+            if persona in self.system_messages:
+                self.system_message = self.system_messages[persona]
+                self.update_system_message_in_history()
+            else:
+                raise ValueError(f"Unknown persona: {persona}. Available personas are: {list(self.system_messages.keys())}")
+        
+        # persona custom message
+        def set_custom_system_message(self, custom_message):
+            if not custom_message:
+                raise ValueError("Custom message cannot be empty.")
+            self.system_messages['custom'] = custom_message
+            self.set_persona('custom')
+        
+        # Ensure that the system message is updated in the conversation history when the persona changes
+        def update_system_message_in_history(self):
+            if self.conversation_history and self.conversation_history[0]["role"] == "system":
+                self.conversation_history[0]["content"] = self.system_message
+            else:
+                self.conversation_history.insert(0, {"role": "system", "content": self.system_message})
+
+        # Chat
+        def chat_completion(self, prompt, temperature=None, max_tokens=None):
+            temperature = temperature if temperature is not None else self.temperature
+            max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+
+            self.enforce_token_budget()
+            
+            self.conversation_history.append({"role": "user", "content": prompt})
+            
+            response = self.client.chat.completions.create(
+                model=self.model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                messages=self.conversation_history,
+             )
+
+          # Extract the AI response and add it to the history
+            ai_response = response.choices[0].message.content
+            self.conversation_history.append({"role": "assistant", "content": ai_response})
+            
+            self.save_conversation_history()
+            
+            return ai_response
+        
+        # load and save conversation history in JSON
+        def load_conversation_history(self):
+            try:
+                with open(self.history_file, "r") as file:
+                    self.conversation_history = json.load(file)
+            except FileNotFoundError:
+                self.conversation_history = [{"role": "system", "content": self.system_message}]
+            except json.JSONDecodeError:
+                print("Error reading the conversation history file. Starting with an empty history.")
+                self.conversation_history = [{"role": "system", "content": self.system_message}]
+
+        def save_conversation_history(self):
+            try:
+                with open(self.history_file, "w") as file:
+                    json.dump(self.conversation_history, file, indent=4)
+            except IOError as e:
+                print(f"An I/O error occurred while saving the conversation history: {e}")
+            except Exception as e:
+                print(f"An unexpected error occurred while saving the conversation history: {e}")
+        
+conv_manager = ConversationManager()
+
+# Change persona
+conv_manager.set_persona('pino')
+
+# Custom persona
+# conv_manager.set_custom_system_message("You are the saddest life form in the universe.")
+
+prompt = "Tell me your day."
+
+response = conv_manager.chat_completion(prompt)
+print(response)
+
+# Test the conversation history tracking
+print("Conversation history:")
+for message in conv_manager.conversation_history:
+    print(f'{message["role"].title()}: {message["content"]}')
+
+# Test the count_tokens method again
+print("Tokens in the last response:", conv_manager.count_tokens(response))
+
+# Test the total_tokens_used method again
+print("Total tokens used so far:", conv_manager.total_tokens_used())
